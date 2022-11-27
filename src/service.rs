@@ -5,6 +5,7 @@ use tower_service::Service;
 
 use crate::{error, KeycloakAuth};
 
+#[derive(Clone)]
 pub struct KeycloakService<T> {
     inner: T,
     auth: KeycloakAuth,
