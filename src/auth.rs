@@ -15,6 +15,8 @@ use crate::{
     token::Token,
 };
 
+type TokenResponseFuture = Pin<Box<dyn Future<Output = Result<Token>> + Send + Sync + 'static>>;
+
 #[derive(Clone)]
 pub struct KeycloakAuth {
     inner: Arc<RwLock<KeycloakAuthInner>>,
@@ -139,10 +141,10 @@ impl KeycloakAuthInner {
 pub enum State {
     NotFetched,
     Fetching {
-        fut: Pin<Box<dyn Future<Output = Result<Token>>>>,
+        fut: TokenResponseFuture,
     },
     Refetching {
-        fut: Pin<Box<dyn Future<Output = Result<Token>>>>,
+        fut: TokenResponseFuture,
         token: Token,
     },
     Fetched {
