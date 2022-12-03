@@ -2,6 +2,7 @@ use futures_util::future::MapErr;
 use futures_util::TryFutureExt;
 use std::task::{ready, Context, Poll};
 use tower_service::Service;
+use tracing::debug;
 
 use crate::{error, KeycloakAuth};
 
@@ -36,7 +37,10 @@ where
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match ready!(self.auth.poll_ready(cx)) {
             Ok(()) => self.inner.poll_ready(cx).map_err(Error::Service),
-            Err(err) => Poll::Ready(Err(Error::Keycloak(err))),
+            Err(err) => {
+                debug!(?err);
+                Poll::Ready(Err(Error::Keycloak(err)))
+            }
         }
     }
 

@@ -1,21 +1,21 @@
-use futures_util::Future;
+use futures_util::future::BoxFuture;
 use hyper::{header::AUTHORIZATION, http::HeaderValue, Request};
 use parking_lot::RwLock;
 use std::{
     fmt,
-    pin::Pin,
     sync::Arc,
     task::{ready, Context, Poll},
 };
-use tracing::debug;
+use tracing::trace;
 
 use crate::{
     client::{self, KeycloakClient},
     error::Result,
+    sync::RefGuard,
     token::Token,
 };
 
-type TokenResponseFuture = Pin<Box<dyn Future<Output = Result<Token>> + Send + Sync + 'static>>;
+pub type TokenResponseFuture = BoxFuture<'static, Result<Token>>;
 
 #[derive(Clone)]
 pub struct KeycloakAuth {
@@ -28,17 +28,16 @@ impl KeycloakAuth {
         realm: String,
         client_id: String,
         client_secret: String,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        Ok(Self {
             inner: Arc::new(RwLock::new(KeycloakAuthInner::new(
-                client::KeycloakClient {
-                    inner: reqwest::Client::new(),
-                    token_url: format!("{server_url}/realms/{realm}/protocol/openid-connect/token"),
+                client::KeycloakClient::new(
+                    format!("{server_url}/realms/{realm}/protocol/openid-connect/token"),
                     client_id,
                     client_secret,
-                },
+                )?,
             ))),
-        }
+        })
     }
 
     pub fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
@@ -87,48 +86,44 @@ impl KeycloakAuthInner {
         loop {
             match self.state {
                 State::NotFetched => {
-                    self.state = {
-                        let oauth_client = self.client.clone();
+                    trace!("State::NotFetched");
 
+                    self.state = {
                         State::Fetching {
-                            fut: Box::pin(
-                                async move { oauth_client.new_token().await.map(Into::into) },
-                            ),
+                            fut: RefGuard::new(self.client.fetch_token_boxed()),
                         }
                     };
                 }
-                State::Fetching { ref mut fut } => match ready!(fut.as_mut().poll(cx)) {
+                State::Fetching { ref mut fut } => match ready!(fut.get_mut().as_mut().poll(cx)) {
                     Ok(token) => {
-                        debug!("new {:?}", token);
+                        trace!("State::Fetching {:?}", token);
                         self.state = State::Fetched { token };
                         return Poll::Ready(Ok(()));
                     }
                     Err(err) => {
+                        self.state = State::NotFetched;
                         return Poll::Ready(Err(err));
                     }
                 },
-                State::Refetching { ref mut fut, .. } => match ready!(fut.as_mut().poll(cx)) {
-                    Ok(token) => {
-                        debug!("refreshed {:?}", token);
-                        self.state = State::Fetched { token };
-                        return Poll::Ready(Ok(()));
+                State::Refetching { ref mut fut, .. } => {
+                    match ready!(fut.get_mut().as_mut().poll(cx)) {
+                        Ok(token) => {
+                            trace!("State::Refetching {:?}", token);
+                            self.state = State::Fetched { token };
+                            return Poll::Ready(Ok(()));
+                        }
+                        Err(err) => {
+                            self.state = State::NotFetched;
+                            return Poll::Ready(Err(err));
+                        }
                     }
-                    Err(err) => {
-                        return Poll::Ready(Err(err));
-                    }
-                },
+                }
                 State::Fetched { ref token } => {
-                    if !token.is_expired() {
-                        return Poll::Ready(Ok(()));
-                    }
+                    trace!("State::Fetched (token is expired)");
 
                     self.state = {
-                        let oauth_client = self.client.clone();
-
                         State::Refetching {
-                            fut: Box::pin(
-                                async move { oauth_client.new_token().await.map(Into::into) },
-                            ),
+                            fut: RefGuard::new(self.client.fetch_token_boxed()),
                             token: token.clone(),
                         }
                     };
@@ -138,13 +133,13 @@ impl KeycloakAuthInner {
     }
 }
 
-pub enum State {
+pub(crate) enum State {
     NotFetched,
     Fetching {
-        fut: TokenResponseFuture,
+        fut: RefGuard<TokenResponseFuture>,
     },
     Refetching {
-        fut: TokenResponseFuture,
+        fut: RefGuard<TokenResponseFuture>,
         token: Token,
     },
     Fetched {
